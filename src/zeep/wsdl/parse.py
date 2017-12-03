@@ -1,5 +1,11 @@
+"""
+    zeep.wsdl.parse
+    ~~~~~~~~~~~~~~~
+
+"""
 from lxml import etree
 
+from zeep.exceptions import IncompleteMessage, LookupError, NamespaceError
 from zeep.utils import qname_attr
 from zeep.wsdl import definitions
 
@@ -12,13 +18,23 @@ NSMAP = {
 def parse_abstract_message(wsdl, xmlelement):
     """Create an AbstractMessage object from a xml element.
 
+    Definition::
+
         <definitions .... >
             <message name="nmtoken"> *
                 <part name="nmtoken" element="qname"? type="qname"?/> *
             </message>
         </definitions>
+
+    :param wsdl: The parent definition instance
+    :type wsdl: zeep.wsdl.wsdl.Definition
+    :param xmlelement: The XML node
+    :type xmlelement: lxml.etree._Element
+    :rtype: zeep.wsdl.definitions.AbstractMessage
+
     """
     tns = wsdl.target_namespace
+    message_name = qname_attr(xmlelement, 'name', tns)
     parts = []
 
     for part in xmlelement.findall('wsdl:part', namespaces=NSMAP):
@@ -26,16 +42,22 @@ def parse_abstract_message(wsdl, xmlelement):
         part_element = qname_attr(part, 'element', tns)
         part_type = qname_attr(part, 'type', tns)
 
-        if part_element is not None:
-            part_element = wsdl.types.get_element(part_element)
-        if part_type is not None:
-            part_type = wsdl.types.get_type(part_type)
+        try:
+            if part_element is not None:
+                part_element = wsdl.types.get_element(part_element)
+            if part_type is not None:
+                part_type = wsdl.types.get_type(part_type)
+
+        except (NamespaceError, LookupError):
+            raise IncompleteMessage((
+                "The wsdl:message for %r contains an invalid part (%r): "
+                "invalid xsd type or elements"
+            ) % (message_name.text, part_name))
 
         part = definitions.MessagePart(part_element, part_type)
         parts.append((part_name, part))
 
     # Create the object, add the parts and return it
-    message_name = qname_attr(xmlelement, 'name', tns)
     msg = definitions.AbstractMessage(message_name)
     for part_name, part in parts:
         msg.add_part(part_name, part)
@@ -47,6 +69,8 @@ def parse_abstract_operation(wsdl, xmlelement):
 
     This is called from the parse_port_type function since the abstract
     operations are part of the port type element.
+
+    Definition::
 
         <wsdl:operation name="nmtoken">*
            <wsdl:documentation .... /> ?
@@ -60,6 +84,12 @@ def parse_abstract_operation(wsdl, xmlelement):
                <wsdl:documentation .... /> ?
            </wsdl:fault>
         </wsdl:operation>
+
+    :param wsdl: The parent definition instance
+    :type wsdl: zeep.wsdl.wsdl.Definition
+    :param xmlelement: The XML node
+    :type xmlelement: lxml.etree._Element
+    :rtype: zeep.wsdl.definitions.AbstractOperation
 
     """
     name = xmlelement.get('name')
@@ -75,7 +105,11 @@ def parse_abstract_operation(wsdl, xmlelement):
         param_msg = qname_attr(
             msg_node, 'message', wsdl.target_namespace)
         param_name = msg_node.get('name')
-        param_value = wsdl.get('messages', param_msg.text)
+
+        try:
+            param_value = wsdl.get('messages', param_msg.text)
+        except IndexError:
+            return
 
         if tag_name == 'input':
             kwargs['input_message'] = param_value
@@ -95,18 +129,27 @@ def parse_abstract_operation(wsdl, xmlelement):
 def parse_port_type(wsdl, xmlelement):
     """Create a PortType object from a xml element.
 
+    Definition::
+
         <wsdl:definitions .... >
             <wsdl:portType name="nmtoken">
                 <wsdl:operation name="nmtoken" .... /> *
             </wsdl:portType>
         </wsdl:definitions>
 
+    :param wsdl: The parent definition instance
+    :type wsdl: zeep.wsdl.wsdl.Definition
+    :param xmlelement: The XML node
+    :type xmlelement: lxml.etree._Element
+    :rtype: zeep.wsdl.definitions.PortType
+
     """
     name = qname_attr(xmlelement, 'name', wsdl.target_namespace)
     operations = {}
     for elm in xmlelement.findall('wsdl:operation', namespaces=NSMAP):
         operation = parse_abstract_operation(wsdl, elm)
-        operations[operation.name] = operation
+        if operation:
+            operations[operation.name] = operation
     return definitions.PortType(name, operations)
 
 
@@ -116,10 +159,18 @@ def parse_port(wsdl, xmlelement):
     This is called via the parse_service function since ports are part of the
     service xml elements.
 
+    Definition::
+
         <wsdl:port name="nmtoken" binding="qname"> *
            <wsdl:documentation .... /> ?
            <-- extensibility element -->
         </wsdl:port>
+
+    :param wsdl: The parent definition instance
+    :type wsdl: zeep.wsdl.wsdl.Definition
+    :param xmlelement: The XML node
+    :type xmlelement: lxml.etree._Element
+    :rtype: zeep.wsdl.definitions.Port
 
     """
     name = xmlelement.get('name')
@@ -130,7 +181,7 @@ def parse_port(wsdl, xmlelement):
 def parse_service(wsdl, xmlelement):
     """
 
-    Syntax::
+    Definition::
 
         <wsdl:service name="nmtoken"> *
             <wsdl:documentation .... />?
@@ -149,6 +200,12 @@ def parse_service(wsdl, xmlelement):
               <soap:address location="http://example.com/stockquote"/>
             </port>
           </service>
+
+    :param wsdl: The parent definition instance
+    :type wsdl: zeep.wsdl.wsdl.Definition
+    :param xmlelement: The XML node
+    :type xmlelement: lxml.etree._Element
+    :rtype: zeep.wsdl.definitions.Service
 
     """
     name = xmlelement.get('name')

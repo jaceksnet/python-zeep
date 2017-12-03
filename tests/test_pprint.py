@@ -8,7 +8,7 @@ def test_dict():
         'foo_2': 'bar',
         'foo_3': 'bar',
         'foo_4': {
-            'bar': '1',
+            'foo': '1',
             'bar': {
                 'bala': 'qwe',
             },

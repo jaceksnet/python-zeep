@@ -1,5 +1,8 @@
+import pickle
+
 import pytest
 import six
+from lxml.etree import QName
 
 from zeep import xsd
 from zeep.xsd import valueobjects
@@ -214,9 +217,10 @@ def test_choice_mixed():
                 xsd.Element('item_2', xsd.String()),
             ]),
             xsd.Element('item_2', xsd.String())
-        ])
+        ]),
+        qname=QName('http://tests.python-zeep.org', 'container')
     )
-    expected = '({item_1: xsd:string} | {item_2: xsd:string}), item_2__1: xsd:string'
+    expected = '{http://tests.python-zeep.org}container(({item_1: xsd:string} | {item_2: xsd:string}), item_2__1: xsd:string)'
     assert xsd_type.signature() == expected
 
     args = tuple([])
@@ -400,4 +404,36 @@ def test_choice_sequences_init_dict():
         '_value_1': [
             {'item_1': 'value-1', 'item_2': 'value-2'}
         ]
+    }
+
+
+def test_pickle():
+    xsd_type = xsd.ComplexType(
+        xsd.Sequence([
+            xsd.Element('item_1', xsd.String()),
+            xsd.Element('item_2', xsd.String())
+        ]))
+
+    obj = xsd_type(item_1='x', item_2='y')
+
+    data = pickle.dumps(obj)
+    obj_rt = pickle.loads(data)
+
+    assert obj.item_1 == 'x'
+    assert obj.item_2 == 'y'
+    assert obj_rt.item_1 == 'x'
+    assert obj_rt.item_2 == 'y'
+
+
+def test_json():
+    xsd_type = xsd.ComplexType(
+        xsd.Sequence([
+            xsd.Element('item_1', xsd.String()),
+            xsd.Element('item_2', xsd.String())
+        ]))
+
+    obj = xsd_type(item_1='x', item_2='y')
+    assert obj.__json__() == {
+        'item_1': 'x',
+        'item_2': 'y',
     }

@@ -6,15 +6,15 @@ from zeep import cache, transports
 
 
 @pytest.mark.requests
-def test_default_cache():
-    transport = transports.Transport()
-    assert isinstance(transport.cache, cache.SqliteCache)
-
-
-@pytest.mark.requests
 def test_no_cache():
     transport = transports.Transport(cache=None)
     assert transport.cache is None
+
+
+@pytest.mark.requests
+def test_custom_cache():
+    transport = transports.Transport(cache=cache.SqliteCache())
+    assert isinstance(transport.cache, cache.SqliteCache)
 
 
 @pytest.mark.requests

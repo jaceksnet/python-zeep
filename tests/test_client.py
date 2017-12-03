@@ -3,12 +3,19 @@ import os
 import pytest
 import requests_mock
 
-from zeep import client
+from tests.utils import load_xml
+from zeep import client, xsd
 from zeep.exceptions import Error
 
 
 def test_bind():
     client_obj = client.Client('tests/wsdl_files/soap.wsdl')
+    service = client_obj.bind()
+    assert service
+
+
+def test_unknown_transport():
+    client_obj = client.Client('tests/wsdl_files/soap_transport_err.wsdl')
     service = client_obj.bind()
     assert service
 
@@ -36,6 +43,27 @@ def test_service_proxy_non_existing():
         assert client_obj.service.NonExisting
 
 
+def test_service_proxy_dir_operations():
+    client_obj = client.Client('tests/wsdl_files/soap.wsdl')
+    operations = [op for op in dir(client_obj.service) if not op.startswith('_')]
+    assert set(operations) == set(['GetLastTradePrice', 'GetLastTradePriceNoOutput']) 
+
+
+def test_operation_proxy_doc():
+    client_obj = client.Client('tests/wsdl_files/soap.wsdl')
+    assert (client_obj.service.GetLastTradePrice.__doc__ 
+            == 'GetLastTradePrice(tickerSymbol: xsd:string, '
+                                 'account: ns0:account, '
+                                 'country: ns0:country) -> price: xsd:float')
+
+
+def test_open_from_file_object():
+    with open('tests/wsdl_files/soap_transport_err.wsdl', 'rb') as fh:
+        client_obj = client.Client(fh)
+        service = client_obj.bind()
+        assert service
+
+
 def test_client_no_wsdl():
     with pytest.raises(ValueError):
         client.Client(None)
@@ -52,10 +80,14 @@ def test_force_https():
         response = fh.read()
 
     with requests_mock.mock() as m:
-        m.get('https://tests.python-zeep.org/wsdl', text=response, status_code=200)
-        client_obj = client.Client('https://tests.python-zeep.org/wsdl')
+        url = 'https://tests.python-zeep.org/wsdl'
+        m.get(url, text=response, status_code=200)
+        client_obj = client.Client(url)
         binding_options = client_obj.service._binding_options
         assert binding_options['address'].startswith('https')
+
+        expected_url = 'https://example.com/stockquote'
+        assert binding_options['address'] == expected_url
 
 
 @pytest.mark.requests
@@ -163,3 +195,99 @@ def test_set_context_options_timeout():
             assert obj.transport.operation_timeout == 90
         assert obj.transport.operation_timeout == 120
     assert obj.transport.operation_timeout is None
+
+
+def test_set_context_options_raw_response():
+    obj = client.Client('tests/wsdl_files/soap.wsdl')
+
+    assert obj.raw_response is False
+    with obj.options(raw_response=True):
+        assert obj.raw_response is True
+
+        with obj.options():
+            # Check that raw_response is not changed by default value
+            assert obj.raw_response is True
+    # Check that the original value returned
+    assert obj.raw_response is False
+
+
+@pytest.mark.requests
+def test_default_soap_headers():
+    header = xsd.ComplexType(
+        xsd.Sequence([
+            xsd.Element('{http://tests.python-zeep.org}name', xsd.String()),
+            xsd.Element('{http://tests.python-zeep.org}password', xsd.String()),
+        ])
+    )
+    header_value = header(name='ik', password='foo')
+
+    client_obj = client.Client('tests/wsdl_files/soap.wsdl')
+    client_obj.set_default_soapheaders([header_value])
+
+    response = """
+    <?xml version="1.0"?>
+    <soapenv:Envelope
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+        xmlns:stoc="http://example.com/stockquote.xsd">
+       <soapenv:Header/>
+       <soapenv:Body>
+          <stoc:TradePrice>
+             <price>120.123</price>
+          </stoc:TradePrice>
+       </soapenv:Body>
+    </soapenv:Envelope>
+    """.strip()
+
+    with requests_mock.mock() as m:
+        m.post('http://example.com/stockquote', text=response)
+        client_obj.service.GetLastTradePrice('foobar')
+
+        doc = load_xml(m.request_history[0].body)
+        header = doc.find('{http://schemas.xmlsoap.org/soap/envelope/}Header')
+        assert header is not None
+        assert len(header.getchildren()) == 2
+
+
+@pytest.mark.requests
+def test_default_soap_headers_extra():
+    header = xsd.ComplexType(
+        xsd.Sequence([
+            xsd.Element('{http://tests.python-zeep.org}name', xsd.String()),
+            xsd.Element('{http://tests.python-zeep.org}password', xsd.String()),
+        ])
+    )
+    header_value = header(name='ik', password='geheim')
+
+    extra_header = xsd.ComplexType(
+        xsd.Sequence([
+            xsd.Element('{http://tests.python-zeep.org}name', xsd.String()),
+            xsd.Element('{http://tests.python-zeep.org}password', xsd.String()),
+        ])
+    )
+    extra_header_value = extra_header(name='ik', password='geheim')
+
+    client_obj = client.Client('tests/wsdl_files/soap.wsdl')
+    client_obj.set_default_soapheaders([header_value])
+
+    response = """
+    <?xml version="1.0"?>
+    <soapenv:Envelope
+        xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+        xmlns:stoc="http://example.com/stockquote.xsd">
+       <soapenv:Header/>
+       <soapenv:Body>
+          <stoc:TradePrice>
+             <price>120.123</price>
+          </stoc:TradePrice>
+       </soapenv:Body>
+    </soapenv:Envelope>
+    """.strip()
+
+    with requests_mock.mock() as m:
+        m.post('http://example.com/stockquote', text=response)
+        client_obj.service.GetLastTradePrice('foobar', _soapheaders=[extra_header_value])
+
+        doc = load_xml(m.request_history[0].body)
+        header = doc.find('{http://schemas.xmlsoap.org/soap/envelope/}Header')
+        assert header is not None
+        assert len(header.getchildren()) == 4

@@ -1,14 +1,17 @@
 import logging
 
 from lxml import etree
+from requests_toolbelt.multipart.decoder import MultipartDecoder
 
-from zeep import plugins, wsa
+from zeep import ns, plugins, wsa
 from zeep.exceptions import Fault, TransportError, XMLSyntaxError
-from zeep.parser import parse_xml
-from zeep.utils import as_qname, qname_attr
+from zeep.loader import parse_xml
+from zeep.utils import as_qname, get_media_type, qname_attr
+from zeep.wsdl.attachments import MessagePack
 from zeep.wsdl.definitions import Binding, Operation
 from zeep.wsdl.messages import DocumentMessage, RpcMessage
-from zeep.wsdl.utils import etree_to_string
+from zeep.wsdl.messages.xop import process_xop
+from zeep.wsdl.utils import etree_to_string, url_http_to_https
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +86,7 @@ class SoapBinding(Binding):
 
             # Apply WSSE
             if client.wsse:
-                envelope, http_headers = client.wsse.sign(envelope, http_headers)
+                envelope, http_headers = client.wsse.apply(envelope, http_headers)
         return envelope, http_headers
 
     def send(self, client, options, operation, args, kwargs):
@@ -95,9 +98,9 @@ class SoapBinding(Binding):
         :type options: dict
         :param operation: The operation object from which this is a reply
         :type operation: zeep.wsdl.definitions.Operation
-        :param args: The *args to pass to the operation
+        :param args: The args to pass to the operation
         :type args: tuple
-        :param kwargs: The **kwargs to pass to the operation
+        :param kwargs: The kwargs to pass to the operation
         :type kwargs: dict
 
         """
@@ -110,6 +113,11 @@ class SoapBinding(Binding):
             options['address'], envelope, http_headers)
 
         operation_obj = self.get(operation)
+
+        # If the client wants to return the raw data then let's do that.
+        if client.raw_response:
+            return response
+
         return self.process_reply(client, operation_obj, response)
 
     def process_reply(self, client, operation, response):
@@ -126,14 +134,40 @@ class SoapBinding(Binding):
         if response.status_code != 200 and not response.content:
             raise TransportError(
                 u'Server returned HTTP status %d (no content available)'
-                % response.status_code)
+                % response.status_code,
+                status_code=response.status_code)
+
+        content_type = response.headers.get('Content-Type', 'text/xml')
+        media_type = get_media_type(content_type)
+        message_pack = None
+
+        # If the reply is a multipart/related then we need to retrieve all the
+        # parts
+        if media_type == 'multipart/related':
+            decoder = MultipartDecoder(
+                response.content, content_type, response.encoding or 'utf-8')
+            content = decoder.parts[0].content
+            if len(decoder.parts) > 1:
+                message_pack = MessagePack(parts=decoder.parts[1:])
+        else:
+            content = response.content
 
         try:
-            doc = parse_xml(response.content, recover=True)
+            doc = parse_xml(
+                content, self.transport,
+                strict=client.wsdl.strict,
+                xml_huge_tree=client.xml_huge_tree)
         except XMLSyntaxError:
             raise TransportError(
-                u'Server returned HTTP status %d (%s)'
-                % (response.status_code, response.content))
+                'Server returned HTTP status %d (%s)'
+                % (response.status_code, response.content),
+                status_code=response.status_code,
+                content=response.content)
+
+        # Check if this is an XOP message which we need to decode first
+        if message_pack:
+            if process_xop(doc, message_pack):
+                message_pack = None
 
         if client.wsse:
             client.wsse.verify(doc)
@@ -148,19 +182,28 @@ class SoapBinding(Binding):
         if response.status_code != 200 or fault_node is not None:
             return self.process_error(doc, operation)
 
-        return operation.process_reply(doc)
+        result = operation.process_reply(doc)
+
+        if message_pack:
+            message_pack._set_root(result)
+            return message_pack
+        return result
 
     def process_error(self, doc, operation):
         raise NotImplementedError
 
     def process_service_port(self, xmlelement, force_https=False):
         address_node = xmlelement.find('soap:address', namespaces=self.nsmap)
+        if address_node is None:
+            logger.debug("No valid soap:address found for service")
+            return
 
         # Force the usage of HTTPS when the force_https boolean is true
         location = address_node.get('location')
-        if force_https and location and location.startswith('http://'):
-            logger.warning("Forcing soap:address location to HTTPS")
-            location = 'https://' + location[8:]
+        if force_https and location:
+            location = url_http_to_https(location)
+            if location != address_node.get('location'):
+                logger.warning("Forcing soap:address location to HTTPS")
 
         return {
             'address': location
@@ -169,6 +212,9 @@ class SoapBinding(Binding):
     @classmethod
     def parse(cls, definitions, xmlelement):
         """
+
+        Definition::
+
             <wsdl:binding name="nmtoken" type="qname"> *
                 <-- extensibility element (1) --> *
                 <wsdl:operation name="nmtoken"> *
@@ -192,8 +238,16 @@ class SoapBinding(Binding):
         # default style attribute for the operations.
         soap_node = xmlelement.find('soap:binding', namespaces=cls.nsmap)
         transport = soap_node.get('transport')
-        if transport != 'http://schemas.xmlsoap.org/soap/http':
-            raise NotImplementedError("Only soap/http is supported for now")
+
+        supported_transports = [
+            'http://schemas.xmlsoap.org/soap/http',
+            'http://www.w3.org/2003/05/soap/bindings/HTTP/',
+        ]
+
+        if transport not in supported_transports:
+            raise NotImplementedError(
+                "The binding transport %s is not supported (only soap/http)" % (
+                    transport))
         default_style = soap_node.get('style', 'document')
 
         obj = cls(definitions.wsdl, name, port_name, transport, default_style)
@@ -205,10 +259,10 @@ class SoapBinding(Binding):
 
 class Soap11Binding(SoapBinding):
     nsmap = {
-        'soap': 'http://schemas.xmlsoap.org/wsdl/soap/',
-        'soap-env': 'http://schemas.xmlsoap.org/soap/envelope/',
-        'wsdl': 'http://schemas.xmlsoap.org/wsdl/',
-        'xsd': 'http://www.w3.org/2001/XMLSchema',
+        'soap': ns.SOAP_11,
+        'soap-env': ns.SOAP_ENV_11,
+        'wsdl': ns.WSDL,
+        'xsd': ns.XSD,
     }
 
     def process_error(self, doc, operation):
@@ -239,10 +293,10 @@ class Soap11Binding(SoapBinding):
 
 class Soap12Binding(SoapBinding):
     nsmap = {
-        'soap': 'http://schemas.xmlsoap.org/wsdl/soap12/',
-        'soap-env': 'http://www.w3.org/2003/05/soap-envelope',
-        'wsdl': 'http://schemas.xmlsoap.org/wsdl/',
-        'xsd': 'http://www.w3.org/2001/XMLSchema',
+        'soap': ns.SOAP_12,
+        'soap-env': ns.SOAP_ENV_12,
+        'wsdl': ns.WSDL,
+        'xsd': ns.XSD,
     }
 
     def process_error(self, doc, operation):
@@ -308,11 +362,14 @@ class SoapOperation(Operation):
                 "{%s}Envelope root element. The root element found is %s "
             ) % (envelope_qname.namespace, envelope.tag))
 
-        return self.output.deserialize(envelope)
+        if self.output:
+            return self.output.deserialize(envelope)
 
     @classmethod
     def parse(cls, definitions, xmlelement, binding, nsmap):
         """
+
+        Definition::
 
             <wsdl:operation name="nmtoken"> *
                 <soap:operation soapAction="uri"? style="rpc|document"?>?

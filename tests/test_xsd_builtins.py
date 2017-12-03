@@ -6,7 +6,7 @@ import pytest
 import pytz
 import six
 
-from zeep.xsd import builtins
+from zeep.xsd.types import builtins
 
 
 class TestString:
@@ -30,6 +30,8 @@ class TestBoolean:
         assert instance.xmlvalue(False) == 'false'
         assert instance.xmlvalue(1) == 'true'
         assert instance.xmlvalue(0) == 'false'
+        assert instance.xmlvalue('false') == 'false'
+        assert instance.xmlvalue('0') == 'false'
 
     def test_pythonvalue(self):
         instance = builtins.Boolean()
@@ -122,6 +124,10 @@ class TestDateTime:
         value = datetime.datetime(2016, 3, 4, 21, 14, 42, tzinfo=pytz.utc)
         assert instance.xmlvalue(value) == '2016-03-04T21:14:42Z'
 
+        value = datetime.datetime(2016, 3, 4, 21, 14, 42, 123456, tzinfo=pytz.utc)
+        assert instance.xmlvalue(value) == '2016-03-04T21:14:42.123456Z'
+
+        value = datetime.datetime(2016, 3, 4, 21, 14, 42, tzinfo=pytz.utc)
         value = value.astimezone(pytz.timezone('Europe/Amsterdam'))
         assert instance.xmlvalue(value) == '2016-03-04T22:14:42+01:00'
 
@@ -129,6 +135,9 @@ class TestDateTime:
         instance = builtins.DateTime()
         value = datetime.datetime(2016, 3, 4, 21, 14, 42)
         assert instance.pythonvalue('2016-03-04T21:14:42') == value
+
+        value = datetime.datetime(2016, 3, 4, 21, 14, 42, 123456)
+        assert instance.pythonvalue('2016-03-04T21:14:42.123456') == value
 
     def test_pythonvalue_invalid(self):
         instance = builtins.DateTime()
@@ -142,6 +151,7 @@ class TestTime:
         instance = builtins.Time()
         value = datetime.time(21, 14, 42)
         assert instance.xmlvalue(value) == '21:14:42'
+        assert instance.xmlvalue("21:14:42") == '21:14:42'
 
     def test_pythonvalue(self):
         instance = builtins.Time()

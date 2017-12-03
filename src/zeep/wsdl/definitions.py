@@ -1,6 +1,26 @@
+"""
+    zeep.wsdl.definitions
+    ~~~~~~~~~~~~~~~~~~~~~
+
+    A WSDL document exists out of a number of definitions. There are 6 major
+    definitions, these are:
+
+     - types
+     - message
+     - portType
+     - binding
+     - port
+     - service
+
+    This module defines the definitions which occur within a WSDL document,
+
+"""
+import warnings
 from collections import OrderedDict, namedtuple
 
 from six import python_2_unicode_compatible
+
+from zeep.exceptions import IncompleteOperation
 
 MessagePart = namedtuple('MessagePart', ['element', 'type'])
 
@@ -13,8 +33,8 @@ class AbstractMessage(object):
     extensible. WSDL defines several such message-typing attributes for use
     with XSD:
 
-        element: Refers to an XSD element using a QName.
-        type: Refers to an XSD simpleType or complexType using a QName.
+        - element: Refers to an XSD element using a QName.
+        - type: Refers to an XSD simpleType or complexType using a QName.
 
     """
     def __init__(self, name):
@@ -72,6 +92,8 @@ class PortType(object):
 class Binding(object):
     """Base class for the various bindings (SoapBinding / HttpBinding)
 
+    .. raw:: ascii
+
         Binding
            |
            +-> Operation
@@ -100,8 +122,13 @@ class Binding(object):
 
     def resolve(self, definitions):
         self.port_type = definitions.get('port_types', self.port_name.text)
-        for operation in self._operations.values():
-            operation.resolve(definitions)
+
+        for name, operation in list(self._operations.items()):
+            try:
+                operation.resolve(definitions)
+            except IncompleteOperation as exc:
+                warnings.warn(str(exc))
+                del self._operations[name]
 
     def _operation_add(self, operation):
         # XXX: operation name is not unique
@@ -146,7 +173,12 @@ class Operation(object):
         self.faults = {}
 
     def resolve(self, definitions):
-        self.abstract = self.binding.port_type.operations[self.name]
+        try:
+            self.abstract = self.binding.port_type.operations[self.name]
+        except KeyError:
+            raise IncompleteOperation(
+                "The wsdl:operation %r was not found in the wsdl:portType %r" % (
+                    self.name, self.binding.port_type.name.text))
 
     def __repr__(self):
         return '<%s(name=%r, style=%r)>' % (
@@ -170,6 +202,9 @@ class Operation(object):
     @classmethod
     def parse(cls, wsdl, xmlelement, binding):
         """
+
+        Definition::
+
             <wsdl:operation name="nmtoken"> *
                <-- extensibility element (2) --> *
                <wsdl:input name="nmtoken"? > ?
@@ -182,12 +217,17 @@ class Operation(object):
                    <-- extensibility element (5) --> *
                </wsdl:fault>
             </wsdl:operation>
+
         """
         raise NotImplementedError()
 
 
 @python_2_unicode_compatible
 class Port(object):
+    """Specifies an address for a binding, thus defining a single communication
+    endpoint.
+
+    """
     def __init__(self, name, binding_name, xmlelement):
         self.name = name
         self._resolve_context = {
@@ -231,7 +271,9 @@ class Port(object):
 
 @python_2_unicode_compatible
 class Service(object):
+    """Used to aggregate a set of related ports.
 
+    """
     def __init__(self, name):
         self.ports = OrderedDict()
         self.name = name
